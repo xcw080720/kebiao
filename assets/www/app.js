@@ -51,6 +51,7 @@ const SYS_PROMPT = [
   '      "note": "其它备注，没有就空字符串"',
   '    }',
   '  ],',
+  '  "holidays": ["材料里写明的放假日：每一段写成 \\"起止\\"，如 \\"2026-10-01~2026-10-07\\"；单个日期就写一天。没有就给空数组"],',
   '  "warnings": ["拿不准、或材料里缺的信息，写在这里"]',
   '}',
   '',
@@ -67,7 +68,8 @@ const SYS_PROMPT = [
   '5. 同一门课有多个时间段（不同星期/不同节次/不同周次），就拆成多条记录。',
   '6. 如果材料是聊天记录，忽略打招呼、闲聊、表情，只取课程信息。',
   '7. 如果材料里有多门课名字相同但老师/地点不同，也要分开列。',
-  '8. 输出必须是合法 JSON，字符串用双引号。'
+  '8. holidays 只写材料里明确出现的放假/停课日期；看不出来就给空数组，不要猜。',
+  '9. 输出必须是合法 JSON，字符串用双引号。'
 ].join('\n');
 
 const STUB_PROMPT_HINT = '\n\n请把上面的课表截图/文字整理成 JSON。';
@@ -75,7 +77,7 @@ const STUB_PROMPT_HINT = '\n\n请把上面的课表截图/文字整理成 JSON�
 /* ============================ 状态 ============================ */
 let S = null;
 let courses = [];
-const ui = { tab: 'today', week: 0, draft: null, sheet: null, busy: false, editingId: null };
+const ui = { tab: 'today', week: 0, draft: null, sheet: null, busy: false, editingId: null, chatLog: [], chatBusy: false };
 
 function defaults() {
   return {
@@ -96,6 +98,8 @@ function defaults() {
     ],
     defaultOffsets: [15],
     remindEnabled: true,
+    holidays: '',
+    chatLog: [],
     ai: { baseURL: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat' }
   };
 }
@@ -144,6 +148,58 @@ function toast(s) {
 function hash(s) { let h = 0; s = String(s); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
 function colorOf(c) { return c.color || PALETTE[hash(c.name || 'x') % PALETTE.length]; }
 
+/* ============================ 假期 / 停课日 ============================
+   一行一条，支持：
+     2026-10-01                    单个日期
+     2026-10-01 ~ 2026-10-07       日期段（~ ～ - 至 到 都认）
+     国庆 2026-10-01 ~ 2026-10-07   带名字（名字随便放前放后）
+     # 开头                       注释，忽略
+   落在假期的课：不显示在「今天/周」，也不排提醒。 */
+let HOL = null, HOL_RAW = null;
+function hol() {
+  if (HOL && HOL_RAW === S.holidays) return HOL;
+  const days = {}, names = {};
+  let min = null, max = null, bad = 0;
+  const lines = String(S.holidays || '').split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i].trim();
+    if (!raw || raw.charAt(0) === '#') continue;
+    const ds = raw.match(/\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/g);
+    if (!ds || !ds.length) { bad++; continue; }
+    const a = parseD(ds[0]), b = parseD(ds[1] || ds[0]);
+    if (!a || !b) { bad++; continue; }
+    const label = raw.replace(/\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/g, '')
+      .replace(/[~～\-–—至到]/g, ' ').replace(/\s+/g, ' ').trim();
+    const end = b < a ? a : b;
+    for (let d = new Date(a.getTime()); d <= end; d = addDays(d, 1)) {
+      const k = fmtDate(d);
+      days[k] = true;
+      if (label) names[k] = label;
+      if (!min || k < min) min = k;
+      if (!max || k > max) max = k;
+    }
+  }
+  const keys = Object.keys(days).sort();
+  const spans = [];
+  for (let i = 0; i < keys.length; i++) {
+    if (spans.length && addDays(parseD(spans[spans.length - 1].to), 1).getTime() === parseD(keys[i]).getTime()) {
+      spans[spans.length - 1].to = keys[i];
+    } else {
+      spans.push({ from: keys[i], to: keys[i] });
+    }
+  }
+  HOL = { days: days, names: names, count: keys.length, spans: spans, bad: bad };
+  HOL_RAW = S.holidays;
+  return HOL;
+}
+function isHoliday(dateStr) { return !!hol().days[dateStr]; }
+function holidayName(dateStr) { return hol().names[dateStr] || ''; }
+function holidayTag(dateStr) {
+  if (!isHoliday(dateStr)) return '';
+  const n = holidayName(dateStr);
+  return n ? n : '假期';
+}
+
 /* ============================ 课表算法 ============================ */
 function nowWeek() {
   const t = parseD(S.termStart);
@@ -189,7 +245,9 @@ function occForWeek(w) {
     if (c.enabled === false) continue;
     if (!occursInWeek(c, w)) continue;
     const o = occOf(c, w);
-    if (o) out.push(o);
+    if (!o) continue;
+    if (isHoliday(o.date)) continue;   // 假期：这门课这周不算
+    out.push(o);
   }
   out.sort(function (a, b) { return a.startLocal - b.startLocal; });
   return out;
@@ -239,6 +297,7 @@ function boot() {
     S = s;
   }
   courses = (loaded && Array.isArray(loaded.courses)) ? loaded.courses : [];
+  ui.chatLog = Array.isArray(S.chatLog) ? S.chatLog.slice(-30) : [];
   if (!S.termStart) {
     S.termStart = fmtDate(mondayOf(new Date()));
     persist();
@@ -262,6 +321,7 @@ function armReminders() {
       if (!occursInWeek(c, w)) continue;
       const o = occOf(c, w);
       if (!o) continue;
+      if (isHoliday(o.date)) continue;   // 假期不排提醒
       const offs = offsetsOf(c);
       for (let k = 0; k < offs.length; k++) {
         const off = Number(offs[k]);
@@ -301,7 +361,18 @@ function renderToday() {
   const wrap = $('nextWrap');
 
   const next = list.filter(function (o) { return o.endLocal > now; })[0];
-  if (!courses.length) {
+  const todayHol = holidayTag(todayStr);
+  if (todayHol) {
+    // 假期：不算倒计时，也不列今天的课
+    wrap.innerHTML =
+      '<div class="card">' +
+        '<div class="row between"><span class="muted">今天</span>' +
+        '<span class="muted">' + esc(todayStr) + '</span></div>' +
+        '<div style="font-size:19px;font-weight:700;margin-top:4px">' + esc(todayHol) + ' · 放假</div>' +
+        '<div class="muted" style="margin-top:4px">这一天在「设置 → 假期」里，课不显示、也不提醒。</div>' +
+      '</div>';
+    if (cdTimer) { clearInterval(cdTimer); cdTimer = null; }
+  } else if (!courses.length) {
     // 空课表：给一条能走通的路（以前这里只有一句"课表还空着"，而唯一的加课入口要过 AI）
     wrap.innerHTML =
       '<div class="card">' +
@@ -339,7 +410,8 @@ function renderToday() {
   const tl = $('todayList');
   const todayList = list.filter(function (o) { return o.date === todayStr; });
   if (!todayList.length) {
-    tl.innerHTML = '<div class="card tight"><span class="muted">今天没课。</span></div>';
+    tl.innerHTML = '<div class="card tight"><span class="muted">' +
+      (todayHol ? '今天放假，没课。' : '今天没课。') + '</span></div>';
   } else {
     tl.innerHTML = todayList.map(function (o) {
       const dim = o.endLocal < now ? ' dim' : '';
@@ -384,6 +456,14 @@ function renderWeek() {
   $('wLabel').textContent = '第 ' + ui.week + ' 周' + (cw === ui.week ? '（本周）' : '');
   const list = occForWeek(ui.week);
 
+  // 本周每一天的日期 + 是不是假期（假期那列不上课，标出来免得以为是漏课）
+  const base = parseD(S.termStart);
+  const mon = base ? addDays(mondayOf(base), (ui.week - 1) * 7) : null;
+  const dayHol = [];
+  for (let d = 1; d <= 7; d++) dayHol.push(mon ? holidayTag(fmtDate(addDays(mon, d - 1))) : '');
+  const holSpans = [];
+  for (let d = 1; d <= 7; d++) if (dayHol[d - 1]) holSpans.push(DAYS[d] + ' ' + dayHol[d - 1]);
+
   let maxP = 8;
   for (let i = 0; i < list.length; i++) maxP = Math.max(maxP, list[i].periodTo);
   const periods = [];
@@ -403,7 +483,8 @@ function renderWeek() {
   const todayDowNow = todayDow();
   let html = '<table class="grid"><tr><th style="width:34px">节</th>';
   for (let d = 1; d <= 7; d++) {
-    html += '<th class="' + (d === todayDowNow && ui.week === cw ? 'today' : '') + '">' + DAYS[d].slice(1) + '</th>';
+    html += '<th class="' + (d === todayDowNow && ui.week === cw ? 'today' : '') +
+      (dayHol[d - 1] ? ' hol' : '') + '">' + DAYS[d].slice(1) + '</th>';
   }
   html += '</tr>';
 
@@ -414,7 +495,7 @@ function renderWeek() {
     for (let d = 1; d <= 7; d++) {
       if (covered[d + '_' + p]) continue;
       const o = cellMap[d + '_' + p];
-      if (!o) { html += '<td class="cell empty"></td>'; continue; }
+      if (!o) { html += '<td class="cell empty' + (dayHol[d - 1] ? ' hol' : '') + '"></td>'; continue; }
       const span = o.periodTo - o.periodFrom + 1;
       html += '<td class="cell" rowspan="' + span + '" data-oid="' + esc(o.courseId) + '">' +
         '<span class="blk" style="background:' + colorOf(o.course) + '">' + esc(o.name) + '</span></td>';
@@ -422,10 +503,29 @@ function renderWeek() {
     html += '</tr>';
   }
   html += '</table>';
+  if (holSpans.length) {
+    html = '<div class="holbar">本周假期：' + esc(holSpans.join(' · ')) + '（不上课，不提醒）</div>' + html;
+  }
   $('grid').innerHTML = html;
 }
 
 /* ============================ 渲染：设置 ============================ */
+function renderHolStatus() {
+  const el = $('holStatus');
+  if (!el) return;
+  const h = hol();
+  if (!h.count) {
+    el.innerHTML = '<div class="note">还没填假期。填好之后：这些天的课不出现在「今天/周」，也不会响提醒。</div>';
+    return;
+  }
+  const parts = h.spans.slice(0, 12).map(function (s) {
+    return s.from === s.to ? s.from : (s.from + ' ~ ' + s.to);
+  });
+  el.innerHTML = '<div class="note ok">共 ' + h.count + ' 天：' + esc(parts.join('，')) +
+    (h.spans.length > 12 ? ' …' : '') + '</div>' +
+    (h.bad ? '<div class="note warn">有 ' + h.bad + ' 行没看懂，已跳过（一行一条，日期或「起 ~ 止」）。</div>' : '');
+}
+
 function renderSettings() {
   $('sBase').value = S.ai.baseURL || '';
   $('sKey').value = S.ai.apiKey || '';
@@ -435,6 +535,8 @@ function renderSettings() {
   $('sTermName').value = S.semesterName || '';
   $('sOffsets').value = (S.defaultOffsets || []).join(',');
   $('sRemindOn').checked = S.remindEnabled !== false;
+  $('sHolidays').value = S.holidays || '';
+  renderHolStatus();
   $('dCount').textContent = courses.length + ' 门';
   try {
     const inf = JSON.parse(Native.info() || '{}');
@@ -587,8 +689,10 @@ function renderAll() {
   renderSettings();
   $('p-today').className = 'page' + (ui.tab === 'today' ? ' on' : '');
   $('p-week').className = 'page' + (ui.tab === 'week' ? ' on' : '');
+  $('p-chat').className = 'page' + (ui.tab === 'chat' ? ' on' : '');
   $('p-import').className = 'page' + (ui.tab === 'import' ? ' on' : '');
   $('p-set').className = 'page' + (ui.tab === 'set' ? ' on' : '');
+  renderChat();
   const bs = document.querySelectorAll('nav button');
   for (let i = 0; i < bs.length; i++) bs[i].className = (bs[i].getAttribute('data-tab') === ui.tab ? 'on' : '');
 }
@@ -631,10 +735,14 @@ function setImpStatus(kind, text) {
 
 /* ============================ 草稿 ============================ */
 function normalizeDraft(obj) {
-  const out = { termStart: null, courses: [], warnings: [] };
+  const out = { termStart: null, courses: [], warnings: [], holidays: [] };
   if (!obj) return out;
   if (typeof obj.termStart === 'string' && /^\d{4}-\d{2}-\d{2}/.test(obj.termStart)) out.termStart = obj.termStart.slice(0, 10);
   if (Array.isArray(obj.warnings)) out.warnings = obj.warnings.map(String);
+  if (Array.isArray(obj.holidays)) {
+    out.holidays = obj.holidays.map(function (s) { return String(s).trim(); })
+      .filter(Boolean).slice(0, 40);
+  }
   const arr = Array.isArray(obj.courses) ? obj.courses : (Array.isArray(obj.list) ? obj.list : []);
   for (let i = 0; i < arr.length; i++) {
     const c = arr[i] || {};
@@ -677,6 +785,10 @@ function renderDraft() {
   if (d.warnings && d.warnings.length) {
     html += '<div class="note warn">模型自己标的不确定项：<br>' + d.warnings.map(function (w) { return '· ' + esc(w); }).join('<br>') + '</div>';
   }
+  if (d.holidays && d.holidays.length) {
+    html += '<div class="note warn">材料里还写了 ' + d.holidays.length + ' 段假期：' + esc(d.holidays.join('，')) +
+      '<div style="margin-top:8px"><button class="btn ghost sm" id="dHolAdd">并进「设置 → 假期」</button></div></div>';
+  }
   d.courses.forEach(function (c, i) {
     html += '<div class="draft" data-i="' + i + '">' +
       '<div class="dhead"><span class="idx">' + (i + 1) + '</span>' +
@@ -714,6 +826,15 @@ function renderDraft() {
   $('dApplyAdd').onclick = function () { applyDraft(false); };
   $('dApplyReplace').onclick = function () { applyDraft(true); };
   $('dDrop').onclick = function () { ui.draft = null; renderDraft(); setImpStatus('', ''); };
+  if ($('dHolAdd')) $('dHolAdd').onclick = function () {
+    const add = (ui.draft.holidays || []).filter(Boolean).join('\n');
+    const cur = String(S.holidays || '').trim();
+    S.holidays = cur ? (cur + '\n' + add) : add;
+    HOL = null;
+    ui.draft.holidays = [];
+    persist(); renderHolStatus(); armReminders(); renderDraft();
+    toast('假期已并进设置');
+  };
 }
 
 function collectDraft() {
@@ -862,6 +983,25 @@ function bindSettings() {
   };
   $('sWeeks').onchange = function () { S.totalWeeks = Number(this.value) || 20; persist(); renderWeek(); };
   $('sTermName').onchange = function () { S.semesterName = this.value.trim(); persist(); renderHeader(); };
+  $('sHolidays').onchange = function () {
+    S.holidays = this.value;
+    HOL = null;                      // 缓存作废，下次 hol() 重新解析
+    persist(); renderHolStatus(); armReminders(); renderAll();
+  };
+  $('btnHolTip').onclick = function () {
+    if (!String(S.holidays || '').trim()) {
+      S.holidays = '国庆 2026-10-01 ~ 2026-10-07\n元旦 2026-01-01\n2026-04-05';
+      $('sHolidays').value = S.holidays;
+      HOL = null; persist(); renderHolStatus(); armReminders(); renderAll();
+      toast('填了个样例，照着改就行');
+    } else {
+      toast('格式：一行一条，2026-10-01 或 2026-10-01 ~ 2026-10-07');
+    }
+  };
+  $('btnHolClear').onclick = function () {
+    S.holidays = ''; $('sHolidays').value = '';
+    HOL = null; persist(); renderHolStatus(); armReminders(); renderAll();
+  };
   $('sOffsets').onchange = function () {
     S.defaultOffsets = this.value.split(/[,，\s]+/).map(Number).filter(function (n) { return n >= 0; });
     persist(); armReminders();
@@ -969,6 +1109,234 @@ function bindImport() {
   };
 }
 
+/* ============================ 对话 ============================ */
+const CHAT_SYS = [
+  '你是「课表」App 里的助手。用户会连同当前课表一起发消息给你，你可以据此回答，也可以帮他改课表。',
+  '回答要求：简体中文，直接给结论，别客套、别复述用户的话。看不清或没有的信息就说不知道，不要编。',
+  '如果用户是在要求改课表，就在回答的最后附一个 JSON 代码块，格式：',
+  '```json',
+  '{"ops":[{"op":"del","match":"课程名关键字"},{"op":"edit","match":"关键字","set":{"day":4,"periodFrom":5,"periodTo":6}},{"op":"add","course":{"name":"","teacher":"","location":"","day":1,"periodFrom":1,"periodTo":2,"weeks":{"type":"range","from":1,"to":16}}}]}',
+  '```',
+  'op 只有 del / edit / add 三种；match 用课程名里的关键字，能唯一定位就行。',
+  '不改课表时，绝对不要输出任何代码块。'
+].join('\n');
+
+function setChatStatus(kind, text) {
+  const el = $('chatStatus');
+  if (el) el.innerHTML = text ? '<div class="note ' + kind + '">' + esc(text) + '</div>' : '';
+}
+function persistChat() {
+  S.chatLog = ui.chatLog.slice(-30);
+  persist();
+}
+function chatCtx() {
+  return JSON.stringify({
+    today: fmtDate(new Date()) + ' ' + DAYS[todayDow()],
+    week: nowWeek(),
+    settings: {
+      termStart: S.termStart, totalWeeks: S.totalWeeks,
+      semester: S.semesterName || '', holidays: S.holidays || ''
+    },
+    courses: courses.map(function (c) {
+      return {
+        name: c.name, teacher: c.teacher || '', location: c.location || '',
+        day: c.day, periodFrom: c.periodFrom, periodTo: c.periodTo, weeks: c.weeks
+      };
+    })
+  });
+}
+function opsText(ops) {
+  return (ops || []).map(function (o) {
+    if (!o) return '';
+    if (o.op === 'del') return '删掉「' + (o.match || '?') + '」';
+    if (o.op === 'add') return '加「' + ((o.course && o.course.name) || '?') + '」';
+    if (o.op === 'edit') {
+      const s = o.set || {}, p = [];
+      if (s.day) p.push(DAYS[Number(s.day)] || ('周' + s.day));
+      if (s.periodFrom) p.push('第' + s.periodFrom + '-' + (s.periodTo || s.periodFrom) + '节');
+      if (s.location) p.push(String(s.location));
+      if (s.teacher) p.push(String(s.teacher));
+      if (s.weeks) p.push('周次改过');
+      return '把「' + (o.match || '?') + '」改成 ' + (p.join(' ') || '（没写具体值）');
+    }
+    return String(o.op || '?');
+  }).filter(Boolean).join('；');
+}
+/** 把回复里的 ```json {"ops":[...]}``` 抽出来，正文与改动分开 */
+function splitOps(s) {
+  const out = { text: String(s || '').trim(), ops: null };
+  const m = out.text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (!m) return out;
+  let obj = null;
+  try { obj = JSON.parse(m[1].trim()); } catch (e) {
+    const i = m[1].indexOf('{'), j = m[1].lastIndexOf('}');
+    if (i >= 0 && j > i) { try { obj = JSON.parse(m[1].slice(i, j + 1)); } catch (e2) { obj = null; } }
+  }
+  if (obj && Array.isArray(obj.ops) && obj.ops.length) {
+    out.ops = obj.ops;
+    out.text = out.text.replace(m[0], '').trim();
+  }
+  return out;
+}
+function matchCourses(kw) {
+  const k = String(kw || '').trim();
+  if (!k) return [];
+  return courses.filter(function (c) { return String(c.name || '').indexOf(k) >= 0; });
+}
+function applyOps(ops) {
+  const log = [];
+  let n = 0;
+  (ops || []).forEach(function (o) {
+    if (!o || !o.op) return;
+    if (o.op === 'del') {
+      const hit = matchCourses(o.match);
+      if (!hit.length) { log.push('没找到「' + o.match + '」'); return; }
+      courses = courses.filter(function (c) { return hit.indexOf(c) < 0; });
+      n += hit.length; log.push('删掉 ' + hit.length + ' 条「' + o.match + '」');
+    } else if (o.op === 'edit') {
+      const hit = matchCourses(o.match);
+      if (!hit.length) { log.push('没找到「' + o.match + '」'); return; }
+      const set = o.set || {};
+      hit.forEach(function (c) {
+        ['teacher', 'location', 'note'].forEach(function (k) { if (set[k] !== undefined) c[k] = String(set[k]); });
+        ['day', 'periodFrom', 'periodTo'].forEach(function (k) {
+          if (set[k] !== undefined && Number(set[k])) c[k] = Number(set[k]);
+        });
+        if (set.weeks) c.weeks = set.weeks;
+        n++;
+      });
+      log.push('改了 ' + hit.length + ' 条「' + o.match + '」');
+    } else if (o.op === 'add') {
+      const c = o.course || {};
+      if (!c.name) { log.push('有一条 add 没写课程名'); return; }
+      courses.push({
+        id: 'c' + Date.now().toString(36) + n + Math.floor(Math.random() * 1000),
+        name: String(c.name), teacher: String(c.teacher || ''), location: String(c.location || ''),
+        day: Math.min(7, Math.max(1, Number(c.day) || 1)),
+        periodFrom: Math.max(1, Number(c.periodFrom) || 1),
+        periodTo: Math.max(1, Number(c.periodTo || c.periodFrom) || 1),
+        weeks: (c.weeks && c.weeks.type) ? c.weeks : { type: 'range', from: 1, to: S.totalWeeks || 16, list: [] },
+        remindOffsets: [], remindEnabled: true, source: 'chat'
+      });
+      n++; log.push('加了「' + c.name + '」');
+    }
+  });
+  persist();
+  const armed = armReminders();
+  renderAll();
+  return { n: n, text: (log.length ? log.join('；') + '。' : '没有可执行的改动。') + (n ? '已重排 ' + armed + ' 个提醒。' : '') };
+}
+
+function renderChat() {
+  const wrap = $('chatList');
+  if (!wrap) return;
+  if (!ui.chatLog.length) {
+    wrap.innerHTML = '<div class="card"><div class="muted" style="line-height:1.6">' +
+      '在这儿直接跟模型说话。它看得到你的课表和假期设置——可以问「明天有什么课」「这周还剩几节」，' +
+      '也可以说「把周三的高数挪到周四」。要改课表时它会先给一份改动清单，<b>你点了才真的改</b>。' +
+      '</div></div>';
+    return;
+  }
+  wrap.innerHTML = ui.chatLog.map(function (m, i) {
+    if (m.role === 'user') {
+      return '<div class="msg me"><div class="bubble">' + esc(m.text) + '</div></div>';
+    }
+    let h = '<div class="msg ai"><div class="plain">' + esc(m.text) +
+      (m.applied ? '\n\n（已应用：' + esc(m.applied) + '）' : '') + '</div></div>';
+    if (m.ops && m.ops.length) {
+      h += '<div class="ops"><div class="muted">它想改 ' + m.ops.length + ' 处，点一下才生效：</div>' +
+        '<div class="muted" style="margin:5px 0 9px;line-height:1.5">' + esc(opsText(m.ops)) + '</div>' +
+        '<button class="btn" data-apply="' + i + '">应用这些改动</button>' +
+        '<button class="btn ghost" data-skip="' + i + '" style="margin-left:8px">先不动</button></div>';
+    }
+    return h;
+  }).join('');
+  wrap.querySelectorAll('[data-apply]').forEach(function (b) {
+    b.onclick = function () {
+      const i = Number(this.getAttribute('data-apply'));
+      const m = ui.chatLog[i] || {};
+      const rs = applyOps(m.ops || []);
+      m.ops = null; m.applied = rs.text;
+      persistChat(); renderChat(); setChatStatus(rs.n ? 'ok' : 'warn', rs.text);
+    };
+  });
+  wrap.querySelectorAll('[data-skip]').forEach(function (b) {
+    b.onclick = function () {
+      const i = Number(this.getAttribute('data-skip'));
+      if (ui.chatLog[i]) ui.chatLog[i].ops = null;
+      persistChat(); renderChat();
+    };
+  });
+  const sc = $('chatScroll');
+  if (sc) sc.scrollTop = sc.scrollHeight;
+  else window.scrollTo(0, document.body.scrollHeight);
+}
+
+async function sendChat(text) {
+  text = String(text || '').trim();
+  if (!text) { toast('还没写东西'); return; }
+  if (ui.chatBusy) { toast('上一条还在路上'); return; }
+  const ai = S.ai || {};
+  if (!ai.apiKey) { setChatStatus('err', '还没填 API Key，去「设置 → AI 识别」填一下。'); return; }
+  if (!ai.model) { setChatStatus('err', '模型名是空的，去设置里补一下。'); return; }
+
+  ui.chatLog.push({ role: 'user', text: text });
+  ui.chatBusy = true;
+  persistChat(); renderChat();
+  setChatStatus('busy', '正在想…（' + ai.model + '）');
+
+  const hist = ui.chatLog.slice(-8).map(function (m) {
+    return (m.role === 'user' ? '用户：' : '你：') + m.text;
+  }).join('\n');
+
+  const r = await callAi({
+    kind: 'chat', baseURL: ai.baseURL, apiKey: ai.apiKey, model: ai.model,
+    system: CHAT_SYS,
+    user: '【当前课表与设置】\n' + chatCtx() + '\n\n【最近对话】\n' + hist + '\n\n【本轮用户消息】\n' + text,
+    imagePath: ''
+  });
+  ui.chatBusy = false;
+  if (!r.ok) {
+    setChatStatus('err', '出错了：' + r.error);
+    renderChat();
+    return;
+  }
+  const p = splitOps(r.text);
+  ui.chatLog.push({ role: 'ai', text: p.text || '（它这轮没回正文）', ops: p.ops });
+  persistChat(); renderChat(); setChatStatus('', '');
+}
+
+function bindChat() {
+  $('chatSend').onclick = function () {
+    const box = $('chatIn');
+    const t = box.value;
+    box.value = '';
+    sendChat(t);
+  };
+  $('chatIn').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      $('chatSend').onclick();
+    }
+  });
+  $('chatClear').onclick = function () {
+    if (!ui.chatLog.length) { toast('本来就是空的'); return; }
+    openSheet('清空对话？',
+      '<div class="note warn">只删聊天记录，课表和假期设置不动。</div>' +
+      '<div class="two"><button class="btn danger" id="chatClearYes">清空</button>' +
+      '<button class="btn ghost" id="chatClearNo">算了</button></div>',
+      function () {
+        $('chatClearYes').onclick = function () {
+          ui.chatLog = []; persistChat(); closeSheet(); renderChat(); setChatStatus('', '');
+        };
+        $('chatClearNo').onclick = closeSheet;
+      });
+  };
+  $('p-chat').querySelectorAll('.chip[data-q]').forEach(function (ch) {
+    ch.onclick = function () { sendChat(this.getAttribute('data-q')); };
+  });
+}
+
 /* ============================ 启动 ============================ */
 function main() {
   boot();
@@ -1003,6 +1371,7 @@ function main() {
 
   bindSettings();
   bindImport();
+  bindChat();
   renderAll();
   const n = armReminders();
   window.__onResume();
