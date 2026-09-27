@@ -1,0 +1,5 @@
+build/
+_shots/
+_testout/
+*.class
+*.log
