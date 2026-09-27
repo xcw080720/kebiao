@@ -51,6 +51,24 @@
     <div id="draftWrap"></div>
   </section>
 
+  <!-- ================= 对话 ================= -->
+  <section class="page" id="p-chat">
+    <div id="chatList"></div>
+    <div id="chatStatus"></div>
+    <div class="chatbar">
+      <textarea id="chatIn" placeholder="问点什么，或者让它改课表…"></textarea>
+      <div class="two" style="margin-top:8px">
+        <button class="btn" id="chatSend">发出去</button>
+        <button class="btn ghost" id="chatClear">清空对话</button>
+      </div>
+      <div class="chips">
+        <span class="chip" data-q="今天有什么课？">今天有什么课</span>
+        <span class="chip" data-q="这周还有哪几节？">这周还剩几节</span>
+        <span class="chip" data-q="这门课换到别的星期会撞课吗？">会不会撞课</span>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= 设置 ================= -->
   <section class="page" id="p-set">
 
@@ -95,6 +113,19 @@
       </div>
     </div>
 
+    <h3>假期 / 停课日</h3>
+    <div class="card">
+      <div class="field">
+        <label class="f">一行一条，支持单个日期或日期段（这些天不算课、也不提醒）</label>
+        <textarea id="sHolidays" placeholder="国庆 2026-10-01 ~ 2026-10-07&#10;2026-11-20&#10;# 井号开头这行会被忽略"></textarea>
+      </div>
+      <div class="two">
+        <button class="btn ghost" id="btnHolTip">填个格式样例</button>
+        <button class="btn ghost" id="btnHolClear">清空</button>
+      </div>
+      <div id="holStatus" style="margin-top:10px"></div>
+    </div>
+
     <h3>节次时间</h3>
     <div class="card" id="periodBox"></div>
 
@@ -132,6 +163,7 @@
 <nav>
   <button data-tab="today" class="on"><span class="ico">▣</span>今天</button>
   <button data-tab="week"><span class="ico">▦</span>周</button>
+  <button data-tab="chat"><span class="ico">✎</span>对话</button>
   <button data-tab="import"><span class="ico">⊕</span>导入</button>
   <button data-tab="set"><span class="ico">⚙</span>设置</button>
 </nav>
