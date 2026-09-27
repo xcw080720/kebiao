@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>课表</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="title">课表</div>
+  <div class="sub" id="hSub">—</div>
+  <div class="pill" id="hWeek">—</div>
+</header>
+
+<main>
+
+  <!-- ================= 今天 ================= -->
+  <section class="page on" id="p-today">
+    <div id="nextWrap"></div>
+    <h3>今天</h3>
+    <div id="todayList"></div>
+    <h3>接下来</h3>
+    <div id="upcomingList"></div>
+  </section>
+
+  <!-- ================= 周 ================= -->
+  <section class="page" id="p-week">
+    <div class="weekbar">
+      <button class="wbtn" id="wPrev">‹</button>
+      <div class="wlabel" id="wLabel">第 1 周</div>
+      <button class="wbtn" id="wNext">›</button>
+      <button class="btn ghost sm" id="wNow">本周</button>
+      <button class="wbtn add" id="wAdd">＋</button>
+    </div>
+    <div class="gridwrap"><div id="grid"></div></div>
+    <div class="muted" style="margin-top:8px">点课块可以改或删；右上角「＋」手动加新课。课表空着的话，也可以去「导入」。</div>
+  </section>
+
+  <!-- ================= 导入 ================= -->
+  <section class="page" id="p-import">
+    <div class="note" id="impNote">聊天截图、Excel、Word、CSV、纯文字都能扔进来。整理完先给你看草稿，你点了「写入」才进课表。</div>
+    <button class="btn block" id="btnPick">选图片 / 文件</button>
+    <div class="two" style="margin-top:10px">
+      <button class="btn ghost" id="btnPaste">粘贴文字</button>
+      <button class="btn ghost" id="btnDemo">塞个样例</button>
+    </div>
+    <div id="impStatus" style="margin-top:12px"></div>
+    <div id="draftWrap"></div>
+  </section>
+
+  <!-- ================= 设置 ================= -->
+  <section class="page" id="p-set">
+
+    <h3>AI 识别</h3>
+    <div class="card">
+      <div class="field">
+        <label class="f">接口地址（OpenAI 兼容）</label>
+        <input id="sBase" placeholder="https://api.deepseek.com/v1">
+      </div>
+      <div class="field">
+        <label class="f">API Key</label>
+        <input id="sKey" type="password" placeholder="sk-...">
+      </div>
+      <div class="field">
+        <label class="f">模型名</label>
+        <input id="sModel" placeholder="deepseek-chat">
+      </div>
+      <div class="two">
+        <button class="btn ghost" id="btnModels">拉模型列表</button>
+        <button class="btn ghost" id="btnTest">测试连接</button>
+      </div>
+      <div class="muted" style="margin-top:8px;line-height:1.5">
+        Key 只存在这台手机上（App 私有目录），不经任何第三方中转。<br>
+        读截图需要模型支持图片输入；纯文字/表格不需要。
+      </div>
+      <div id="aiStatus" style="margin-top:10px"></div>
+    </div>
+
+    <h3>学期</h3>
+    <div class="card">
+      <div class="field">
+        <label class="f">第 1 周的周一（决定「第几周」怎么算）</label>
+        <input id="sTerm" type="date">
+      </div>
+      <div class="field">
+        <label class="f">总周数</label>
+        <input id="sWeeks" type="number" min="1" max="30">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label class="f">名称</label>
+        <input id="sTermName" placeholder="2026 秋">
+      </div>
+    </div>
+
+    <h3>节次时间</h3>
+    <div class="card" id="periodBox"></div>
+
+    <h3>提醒</h3>
+    <div class="card">
+      <div class="field">
+        <label class="f">默认提前量（分钟，逗号分隔；每门课还能单独改）</label>
+        <input id="sOffsets" placeholder="15,5">
+      </div>
+      <div class="row between" style="margin-bottom:10px">
+        <span class="small">允许提醒</span>
+        <input type="checkbox" id="sRemindOn" style="width:auto">
+      </div>
+      <button class="btn ghost block" id="btnTestNotify">发一条测试通知</button>
+      <div id="remindStatus" style="margin-top:10px"></div>
+    </div>
+
+    <h3>数据</h3>
+    <div class="card">
+      <div class="kv"><span>课程数</span><span id="dCount">0</span></div>
+      <div class="kv"><span>设备</span><span id="dDev">—</span></div>
+      <div class="kv"><span>通知权限</span><span id="dNotif">—</span></div>
+      <div class="two" style="margin-top:10px">
+        <button class="btn ghost" id="btnExport">导出课表</button>
+        <button class="btn danger" id="btnWipe">清空课表</button>
+      </div>
+      <div class="muted" style="margin-top:8px">导出的是一段 JSON，复制走就能备份/换机。</div>
+    </div>
+
+    <div class="muted" style="text-align:center;margin:18px 0 6px">课表 v1.0 · 数据只存在本机</div>
+  </section>
+
+</main>
+
+<nav>
+  <button data-tab="today" class="on"><span class="ico">▣</span>今天</button>
+  <button data-tab="week"><span class="ico">▦</span>周</button>
+  <button data-tab="import"><span class="ico">⊕</span>导入</button>
+  <button data-tab="set"><span class="ico">⚙</span>设置</button>
+</nav>
+
+<div id="sheetHost"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
